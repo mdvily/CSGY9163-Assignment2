@@ -1,12 +1,35 @@
-from flask import Flask, request, make_response, session, redirect, url_for
-import pprint
+from flask import Flask, request, make_response, session, redirect, url_for, escape
+from flask_wtf.csrf import CSRFProtect
+from passlib.hash import sha256_crypt
 import subprocess
 
 app = Flask(__name__)
-app.secret_key = 'lkkljafovlnkadflkjweoirls413dkl342'
+#app.secret_key = 'lkkljafovlnkadflkjweoirls413dkl342'
+app.config["SECRET_KEY"] = "lkkljafovlnkadflkjweoirls413dkl342"
+
+
+#use built-in CSRF protection from Flask-WTF extention
+#reference: https://flask-wtf.readthedocs.io/en/stable/csrf.html
+#csrf = CSRFProtect(app)
 
 #define a dictionary structure to hold active (registered) users
 active_users = {}
+
+@app.after_request
+def add_security_headers(response):
+#Set content security policy in response headers by using the after_request decorator
+#in Flask. Reference: https://pythonise.com/series/learning-flask/python-before-after-request
+#and https://stackoverflow.com/questions/29464276/add-response-headers-to-flask-web-app
+    response.headers['Content-Security-Policy']='default-src \'self\'; script-src \'self\''
+#Set x-frame-options header in the response to prevent 'clickjacking' - a class of attacks where clicks
+#in the outer frame can be translated invisibly to clicks on your page’s elements.
+# Reference: https://flask.palletsprojects.com/en/1.1.x/security/
+    response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+#Force the browser to honor the response content type instead of trying to detect it,
+#which can be abused to generate a cross-site scripting (XSS) attack.
+#Reference: https://flask.palletsprojects.com/en/1.1.x/security/
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    return response
 
 @app.route('/')
 def index():
@@ -48,10 +71,27 @@ def register():
     if request.method == 'GET':
         return present_register_form()
     elif request.method == 'POST':
-        username = request.form['uname']
-        password = request.form['pword']
-        phone= request.form['2fa']
-        return register_user(username, password, phone)
+        username = str(escape(request.form['uname'])) #Escape username input, because username is later displayed to client in HTML
+        #Check to make sure password is not empty
+        if len(request.form['pword']) == 0:
+            return '''
+               <html>   
+                       <head>
+                           <title>Registration Failure</title>
+                           </head>
+                           <body>
+                           <h1>Oops!</h1>
+                           <h2 id="success">Failure. The password field cannot be empty</h2>
+                           <p><a href="/register">Register</a></p>
+                           <p><a href="/login">Log in</a></p>
+                           </body>
+                       </html>
+               '''
+        #convert the password user submitted into a password hash so that it is not stored in plaintext
+        #Reference: https://pythonprogramming.net/password-hashing-flask-tutorial/
+        password_hash = sha256_crypt.encrypt(request.form['pword'])
+        phone = request.form['2fa']
+        return register_user(username, password_hash, phone)
 
 def present_register_form():
     return '''
@@ -67,10 +107,10 @@ def present_register_form():
                     Password: <INPUT SIZE=32 id="pword" name="pword" TYPE='text'/><p/>
                     Cell Phone Number: <INPUT SIZE=32 id="2fa" name="2fa" TYPE='text'/><p/>
                     <button id="registerbutton" type="submit">Register</button>
-                </form>
             </body>
         </html>
         '''
+#<input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
 
 @app.route('/login', methods=['POST', 'GET'])
 def login():
@@ -103,7 +143,7 @@ def present_login_form():
         </html>
     '''
 
-def register_user(username, password, phone):
+def register_user(username, password_hash, phone):
     if len(username) == 0:
         return '''
         <html>
@@ -113,20 +153,6 @@ def register_user(username, password, phone):
                     <body>
                     <h1>Oops!</h1>
                     <h2 id="success">Failure. The username cannot be empty</h2>
-                    <p><a href="/register">Register</a></p>
-                    <p><a href="/login">Log in</a></p>
-                    </body>
-                </html>
-        '''
-    elif len(password) == 0:
-        return '''
-        <html>
-                <head>
-                    <title>Registration Failure</title>
-                    </head>
-                    <body>
-                    <h1>Oops!</h1>
-                    <h2 id="success">Failure. The password field cannot be empty</h2>
                     <p><a href="/register">Register</a></p>
                     <p><a href="/login">Log in</a></p>
                     </body>
@@ -161,8 +187,8 @@ def register_user(username, password, phone):
                         </html>
                 '''
     else:
-        active_users[username] = [password, phone]
-        return '''
+        active_users[username] = [password_hash, phone]
+        response = '''
             <html>
                 <head>
                     <title>Registration Success</title>
@@ -174,6 +200,7 @@ def register_user(username, password, phone):
                     </body>
                 </html>
             '''
+        return response
 
 def check_auth(username, password, phone):
     if username not in active_users:
@@ -192,7 +219,8 @@ def check_auth(username, password, phone):
             '''
     #username exists, which means user registered and password and phone fields are non-empty
     else:
-        if password == active_users[username][0]:
+        #Compare the submitted password with the user's stored password hash
+        if sha256_crypt.verify(password, active_users[username][0]):
             if phone == active_users[username][1]:
                 #reference: https://www.tutorialspoint.com/flask/flask_sessions.htm
                 session['username'] = username
@@ -259,7 +287,7 @@ def spell_check():
             '''
         elif request.method == 'POST':
             fp = open('text_submission.txt', 'w')
-            fp.write(request.form['inputtext'])
+            fp.write(str(escape(request.form['inputtext'])))
             fp.close()
             result = subprocess.check_output(["./a.out", "text_submission.txt", "wordlist.txt"]).decode("utf-8").strip()
             formatted_result = result.replace('\n', ', ')
@@ -270,11 +298,10 @@ def spell_check():
             </head>
             <body>
              <h1>Spell check results:</h1><br>
-             <p id="textout">Submitted text: ''' + request.form['inputtext'] + '''</p><br> 
+             <p id="textout">Submitted text: ''' + str(escape(request.form['inputtext'])) + '''</p><br> 
              <p id="misspelled">Misspelled words: ''' + formatted_result + '''</p><br><br>
              <p><a href="/spell_check">Try another!</a></p>
              <p><a href="/logout">Log out</a></p>
-             <p><a href="/get_cookie">Get cookies</a></p>
             </body>
             </html>
             '''
@@ -292,11 +319,6 @@ def spell_check():
                     </body>
                 </html>
         '''
-
-#Get cookies
-@app.route('/get_cookie')
-def get_cookie():
-    return pprint.pformat(str(request.cookies), indent=4)
 
 #Log out user and delete session cookie
 @app.route('/logout')
